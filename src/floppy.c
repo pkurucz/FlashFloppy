@@ -95,6 +95,7 @@ static void wdata_stop(void);
 
 static always_inline void drive_change_output(
     struct drive *drv, uint8_t outp, bool_t assert);
+static void drive_change_permanent_output(uint8_t outp, bool_t assert);
 
 struct exti_irq {
     uint8_t irq, pri;
@@ -187,6 +188,14 @@ static void drive_change_output(
     drive_change_pin(drv, pin, assert);
 }
 
+static void drive_change_permanent_output(uint8_t outp, bool_t assert)
+{
+    if (pin02 == outp)
+        gpio_write_pin(gpio_out, pin_02, assert ^ pin02_inverted);
+    if (pin34 == outp)
+        gpio_write_pin(gpio_out, pin_34, assert ^ pin34_inverted);
+}
+
 static void update_amiga_id(bool_t amiga_hd_id)
 {
     /* Only for the Amiga interface, with hacked RDY (pin 34) signal. */
@@ -251,6 +260,7 @@ void floppy_cancel(void)
     barrier();
     drive_change_output(drv, outp_index, FALSE);
     drive_change_output(drv, outp_dskchg, TRUE);
+    drive_change_permanent_output(outp_chg1, TRUE);
 }
 
 static struct dma_ring *dma_ring_alloc(void)
@@ -270,6 +280,7 @@ void floppy_set_fintf_mode(void)
         [FINTF_AMIGA]       = "Amiga"
     };
     static const char *const outp_name[] = {
+        [outp_chg1] = "chg1",
         [outp_dskchg] = "chg",
         [outp_rdy] = "rdy",
         [outp_hden] = "dens",
@@ -348,6 +359,7 @@ void floppy_init(void)
     drive_change_output(drv, outp_dskchg, TRUE);
     drive_change_output(drv, outp_wrprot, TRUE);
     drive_change_output(drv, outp_trk0,   TRUE);
+    drive_change_permanent_output(outp_chg1, TRUE);
 
     /* Configure physical interface interrupts. */
     for (i = 0, e = exti_irqs; i < ARRAY_SIZE(exti_irqs); i++, e++) {
@@ -499,6 +511,7 @@ void floppy_insert(unsigned int unit, struct slot *slot)
 
     /* Drive is ready. Set output signals appropriately. */
     drive_change_output(drv, outp_rdy, TRUE);
+//    drive_change_permanent_output(outp_chg1, FALSE);
     update_amiga_id(image->stk_per_rev > stk_ms(300));
     if (!(slot->attributes & AM_RDO))
         drive_change_output(drv, outp_wrprot, FALSE);

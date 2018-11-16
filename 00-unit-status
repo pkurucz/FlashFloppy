@@ -1,0 +1,59 @@
+diff --git a/inc/floppy.h b/inc/floppy.h
+index 5e04f54..342b4e0 100644
+--- a/inc/floppy.h
++++ b/inc/floppy.h
+@@ -141,6 +141,9 @@ struct image {
+         struct dsk_image dsk;
+         struct directaccess da;
+     };
++
++    /* Used for D-A comms. */
++    struct unit_status *unit_status;
+ };
+ 
+ static inline struct write *get_write(struct image *im, uint16_t idx)
+@@ -217,6 +220,23 @@ void floppy_get_track(uint8_t *p_cyl, uint8_t *p_side, uint8_t *p_sel,
+                       uint8_t *p_writing);
+ void floppy_set_fintf_mode(void);
+ 
++enum unit_mode {
++    UM_normal,
++    UM_direct_access,
++    UM_config_dirty,
++    UM_new_slot
++};
++
++struct unit_status {
++    /* Floppy -> Manager */
++    uint8_t cyl, side;
++    bool_t sel, writing;
++    uint8_t mode; /* UM_??? */
++    /* Manager -> Floppy */
++    uint8_t unit_nr;
++    uint16_t slot_nr;
++};
++
+ /*
+  * Local variables:
+  * mode: C
+diff --git a/src/floppy.c b/src/floppy.c
+index de02470..887d1c4 100644
+--- a/src/floppy.c
++++ b/src/floppy.c
+@@ -377,7 +377,7 @@ void floppy_init(void)
+     timer_init(&index.timer_deassert, index_deassert, NULL);
+ }
+ 
+-void floppy_insert(unsigned int unit, struct slot *slot)
++void floppy_insert(struct unit_status *unit_status, struct slot *slot)
+ {
+     struct drive *drv = &drive;
+ 
+@@ -388,6 +388,7 @@ void floppy_insert(unsigned int unit, struct slot *slot)
+ 
+     image = arena_alloc(sizeof(*image));
+     memset(image, 0, sizeof(*image));
++    image->unit_status = unit_status;
+ 
+     /* Large buffer to absorb long write latencies at mass-storage layer. */
+     image->bufs.write_bc.len = 16*1024; /* 16kB, power of two. */

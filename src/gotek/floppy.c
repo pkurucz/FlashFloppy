@@ -231,8 +231,10 @@ static void IRQ_STEP_changed(void)
         return;
 
     /* DSKCHG asserts on any falling edge of STEP. We deassert on any edge. */
-    if ((drv->outp & m(outp_dskchg)) && (dma_rd != NULL))
+    if ((drv->outp & m(outp_dskchg)) && (dma_rd != NULL)) {
         drive_change_output(drv, outp_dskchg, FALSE);
+        drive_change_permanent_output(outp_chg1, FALSE);
+    }
 
     if (!(idr_a & m(pin_step))   /* Not rising edge on STEP? */
         || (drv->step.state & STEP_active) /* Already mid-step? */
