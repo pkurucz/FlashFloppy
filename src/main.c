@@ -311,7 +311,7 @@ static void button_timer_fn(void *unused)
     int i, twobutton_reverse = !!(ff_cfg.twobutton_action & TWOBUTTON_reverse);
 
     /* Check PA5 (USBFLT, active low). */
-    if ((board_id == BRDREV_Gotek_enhanced) && !gpio_read_pin(gpioa, 5)) {
+    if (gotek_enhanced() && !gpio_read_pin(gpioa, 5)) {
         /* Latch the error and disable USBENA. */
         cfg.usb_power_fault = TRUE;
         gpio_write_pin(gpioa, 4, HIGH);
@@ -1817,6 +1817,12 @@ static void handle_errors(FRESULT fres)
 
 int main(void)
 {
+    static const char * const board_name[] = {
+        [BRDREV_Gotek_standard] = "Standard",
+        [BRDREV_Gotek_enhanced] = "Enhanced",
+        [BRDREV_Gotek_sd_card]  = "Enhanced + SD"
+    };
+
     FRESULT fres;
 
     /* Relocate DATA. Initialise BSS. */
@@ -1836,8 +1842,7 @@ int main(void)
     printk("** Keir Fraser <keir.xen@gmail.com>\n");
     printk("** https://github.com/keirf/FlashFloppy\n\n");
 
-    printk("Board: %s\n",
-           (board_id == BRDREV_Gotek_standard) ? "Standard" : "Enhanced");
+    printk("Board: %s\n", board_name[board_id]);
 
     speaker_init();
 

@@ -9,6 +9,7 @@ OBJS += floppy.o
 OBJS += fpec.o
 OBJS += fs.o
 OBJS += main.o
+OBJS += sd_spi.o
 OBJS += spi.o
 OBJS += string.o
 OBJS += stm32f10x.o
@@ -22,7 +23,7 @@ SUBDIRS += display
 SUBDIRS += fatfs
 SUBDIRS += image
 SUBDIRS += gotek
-SUBDIRS += usb
+#SUBDIRS += usb
 
 .PHONY: build_info.c
 build_info.o: CFLAGS += -DFW_VER="\"$(FW_VER)\""

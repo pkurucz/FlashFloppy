@@ -172,6 +172,8 @@ extern uint8_t board_id;
 /* Gotek board revisions */
 #define BRDREV_Gotek_standard 0xf
 #define BRDREV_Gotek_enhanced 0x0
+#define BRDREV_Gotek_sd_card  0x1
+#define gotek_enhanced() (board_id != BRDREV_Gotek_standard)
 
 /* Build info. */
 extern const char fw_ver[];
