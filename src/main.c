@@ -1288,7 +1288,7 @@ static void cfg_update(uint8_t slot_mode)
     else
         native_update(slot_mode);
     if (!(cfg.slot.attributes & AM_DIR)
-        && (ff_cfg.write_protect || usbh_msc_readonly()))
+        && (ff_cfg.write_protect || volume_readonly()))
         cfg.slot.attributes |= AM_RDO;
 }
 
@@ -1374,9 +1374,9 @@ static bool_t choose_new_image(uint8_t init_b)
     return FALSE;
 }
 
-static void assert_usbh_msc_connected(void)
+static void assert_volume_connected(void)
 {
-    if (!usbh_msc_connected() || cfg.usb_power_fault)
+    if (!volume_connected() || cfg.usb_power_fault)
         F_die(FR_DISK_ERR);
 }
 
@@ -1403,7 +1403,7 @@ static int run_floppy(void *_b)
             lcd_scroll_name();
         }
         canary_check();
-        assert_usbh_msc_connected();
+        assert_volume_connected();
         t_prev = t_now;
     }
 
@@ -1497,7 +1497,7 @@ static int floppy_main(void *unused)
         } else {
             fres = F_call_cancellable(run_floppy, &b);
             floppy_cancel();
-            assert_usbh_msc_connected();
+            assert_volume_connected();
         }
 
         arena_init();
@@ -1545,7 +1545,7 @@ static int floppy_main(void *unused)
                 toggle_wp:
                     wait = 0;
                     cfg.slot.attributes ^= AM_RDO;
-                    if (usbh_msc_readonly()) {
+                    if (volume_readonly()) {
                         /* Read-only filesystem: force AM_RDO always. */
                         cfg.slot.attributes |= AM_RDO;
                     }
@@ -1559,7 +1559,7 @@ static int floppy_main(void *unused)
             wait = 0;
             while ((b = buttons) == 0) {
                 /* Bail if USB disconnects. */
-                assert_usbh_msc_connected();
+                assert_volume_connected();
                 /* Update the display. */
                 delay_ms(1);
                 switch (display_mode) {
@@ -1652,7 +1652,7 @@ static int floppy_main(void *unused)
                 b = buttons;
                 if (b != 0)
                     break;
-                assert_usbh_msc_connected();
+                assert_volume_connected();
                 delay_ms(1);
                 lcd_scroll.ticks -= time_ms(1);
                 lcd_scroll_name();
@@ -1779,7 +1779,7 @@ static void handle_errors(FRESULT fres)
     if (pwr) {
         printk("USB Power Fault detected!\n");
         snprintf(msg, sizeof(msg), "USB Power Fault");
-    } else if (usbh_msc_connected() && (fres != FR_OK)) {
+    } else if (volume_connected() && (fres != FR_OK)) {
         printk("**Error %u\n", fres);
         snprintf(msg, sizeof(msg),
                  (display_mode == DM_LED_7SEG)
@@ -1805,7 +1805,7 @@ static void handle_errors(FRESULT fres)
     /* Wait for buttons to be released, pressed and released again. */
     while (buttons)
         continue;
-    while (!buttons && (pwr || usbh_msc_connected()))
+    while (!buttons && (pwr || volume_connected()))
         continue;
     while (buttons)
         continue;

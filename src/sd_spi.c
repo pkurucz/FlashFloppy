@@ -267,7 +267,7 @@ out:
     spi_release();
 }
 
-DSTATUS disk_initialize(BYTE pdrv)
+static DSTATUS sd_disk_initialize(BYTE pdrv)
 {
     uint32_t start, cr1;
     uint16_t rcv;
@@ -391,12 +391,22 @@ out:
     return status;
 }
 
-DSTATUS disk_status (BYTE pdrv)
+static DSTATUS sd_disk_status (BYTE pdrv)
 {
     return pdrv ? STA_NOINIT : status;
 }
 
-DRESULT disk_read(BYTE pdrv, BYTE *buff, DWORD sector, UINT count)
+static DRESULT handle_sd_result(DRESULT res)
+{
+    if (res == RES_ERROR) {
+        /* Disallow further disk operations. */
+        status |= STA_NOINIT;
+    }
+
+    return res;
+}
+
+static DRESULT sd_disk_read(BYTE pdrv, BYTE *buff, DWORD sector, UINT count)
 {
     uint8_t retry = 0;
     UINT todo;
@@ -429,10 +439,11 @@ DRESULT disk_read(BYTE pdrv, BYTE *buff, DWORD sector, UINT count)
 
     } while (todo && (++retry < 3));
 
-    return todo ? RES_ERROR : RES_OK;
+    return handle_sd_result(todo ? RES_ERROR : RES_OK);
 }
 
-DRESULT disk_write(BYTE pdrv, const BYTE *buff, DWORD sector, UINT count)
+static DRESULT sd_disk_write(
+    BYTE pdrv, const BYTE *buff, DWORD sector, UINT count)
 {
     uint8_t retry = 0;
     UINT todo;
@@ -477,10 +488,10 @@ DRESULT disk_write(BYTE pdrv, const BYTE *buff, DWORD sector, UINT count)
 
     } while (todo && (++retry < 3));
 
-    return todo ? RES_ERROR : RES_OK;
+    return handle_sd_result(todo ? RES_ERROR : RES_OK);
 }
 
-DRESULT disk_ioctl(BYTE pdrv, BYTE ctrl, void *buff)
+static DRESULT sd_disk_ioctl(BYTE pdrv, BYTE ctrl, void *buff)
 {
     DRESULT res = RES_ERROR;
 
@@ -501,30 +512,28 @@ DRESULT disk_ioctl(BYTE pdrv, BYTE ctrl, void *buff)
         break;
     }
 
-    return res;
+    return handle_sd_result(res);
 }
 
-void usbh_msc_init(void)
-{
-}
-
-void usbh_msc_buffer_set(uint8_t *buf)
-{
-}
-
-void usbh_msc_process(void)
-{
-}
-
-bool_t usbh_msc_connected(void)
+static bool_t sd_connected(void)
 {
     return !(status & STA_NOINIT) && gpio_read_pin(gpioc, 9);
 }
 
-bool_t usbh_msc_readonly(void)
+static bool_t sd_readonly(void)
 {
     return FALSE;
 }
+
+struct volume_ops sd_ops = {
+    .initialize = sd_disk_initialize,
+    .status = sd_disk_status,
+    .read = sd_disk_read,
+    .write = sd_disk_write,
+    .ioctl = sd_disk_ioctl,
+    .connected = sd_connected,
+    .readonly = sd_readonly
+};
 
 /*
  * Local variables:

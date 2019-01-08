@@ -160,8 +160,7 @@ extern uint8_t lcd_columns, lcd_rows;
 void usbh_msc_init(void);
 void usbh_msc_buffer_set(uint8_t *buf);
 void usbh_msc_process(void);
-bool_t usbh_msc_connected(void);
-bool_t usbh_msc_readonly(void);
+bool_t usbh_msc_inserted(void);
 
 /* Navigation/UI frontend */
 uint16_t get_slot_nr(void);
