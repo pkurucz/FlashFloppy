@@ -422,7 +422,12 @@ static void button_timer_fn(void *unused)
         b |= B_SELECT;
 
     rotary = ((rotary << 2) | ((gpioc->idr >> 10) & 3)) & 15;
-    rb = (rotary_transitions[ff_cfg.rotary & 3] >> (rotary << 1)) & 3;
+    if (1) { /* blackberry */
+        rb = (rotary ^ (rotary >> 2)) & 3; /* & rotary */
+        rb = (rb == 1) ? B_LEFT : (rb == 2) ? B_RIGHT : 0;
+    } else { /* rotary */
+        rb = (rotary_transitions[ff_cfg.rotary & 3] >> (rotary << 1)) & 3;
+    }
     if (ff_cfg.rotary & ROT_reverse)
         rb = rotary_reverse[rb];
     b |= rb;
