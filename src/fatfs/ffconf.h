@@ -8,7 +8,7 @@
 / Function Configurations
 /---------------------------------------------------------------------------*/
 
-#if defined(BOOTLOADER) || defined(RELOADER)
+#if defined(BOOTLOADER)
 #define FF_FS_READONLY	1
 #else
 #define FF_FS_READONLY	0
@@ -19,7 +19,7 @@
 /  and optional writing functions as well. */
 
 
-#if defined(BOOTLOADER) || defined(RELOADER)
+#if defined(BOOTLOADER)
 #define FF_FS_MINIMIZE	1
 #else
 #define FF_FS_MINIMIZE	0
@@ -50,7 +50,11 @@
 /* This option switches f_mkfs() function. (0:Disable or 1:Enable) */
 
 
+#if defined(BOOTLOADER)
 #define FF_USE_FASTSEEK	0
+#else
+#define FF_USE_FASTSEEK	1
+#endif
 /* This option switches fast seek function. (0:Disable or 1:Enable) */
 
 
@@ -143,7 +147,11 @@
 */
 
 
+#if defined(BOOTLOADER)
+#define FF_FS_RPATH		0
+#else
 #define FF_FS_RPATH		1
+#endif
 /* This option configures support for relative path.
 /
 /   0: Disable relative path and remove related functions.

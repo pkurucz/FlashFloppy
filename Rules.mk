@@ -20,12 +20,18 @@ ifneq ($(debug),y)
 FLAGS += -DNDEBUG
 endif
 
-ifeq ($(reloader),y)
-FLAGS += -DRELOADER=1
-endif
-
+# Following options are mutually exclusive
 ifeq ($(bootloader),y)
 FLAGS += -DBOOTLOADER=1
+else ifeq ($(logfile),y)
+FLAGS += -DLOGFILE=1
+endif
+
+ifeq ($(quickdisk),y)
+FLAGS += -DQUICKDISK=1
+floppy=n
+else
+floppy=y
 endif
 
 FLAGS += -MMD -MF .$(@F).d

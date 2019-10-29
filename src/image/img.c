@@ -9,7 +9,7 @@
  * See the file COPYING for more details, or visit <http://unlicense.org>.
  */
 
-static void raw_extend(struct image *im);
+static FSIZE_t raw_extend(struct image *im);
 static void raw_setup_track(
     struct image *im, uint16_t track, uint32_t *start_pos);
 static bool_t raw_read_track(struct image *im);
@@ -22,10 +22,11 @@ static bool_t fm_read_track(struct image *im);
 static void *align_p(void *p);
 static void check_p(void *p, struct image *im);
 
+#define SIMPLE_EMPTY_TRK 2 /* if has_empty */
 const static struct simple_layout {
     uint16_t nr_sectors;
-    uint8_t is_fm, has_iam, no, gap3, gap4a, base[2];
-} dfl_simple_layout = { 0, FALSE, TRUE, ~0, 0, 0, { 1, 1 } };
+    uint8_t is_fm, has_iam, has_empty, no, gap3, gap4a, base[2];
+} dfl_simple_layout = { 0, FALSE, TRUE, FALSE, ~0, 0, 0, { 1, 1 } };
 static void simple_layout(
     struct image *im, const struct simple_layout *layout);
 
@@ -175,7 +176,7 @@ static void reset_all_params(struct image *im)
 
 static bool_t raw_type_open(struct image *im, const struct raw_type *type)
 {
-    struct simple_layout layout;
+    struct simple_layout layout = dfl_simple_layout;
     unsigned int nr_cyls, cyl_sz, nr_sides;
 
     /* Walk the layout/type hints looking for a match on file size. */
@@ -462,12 +463,27 @@ static bool_t adfs_open(struct image *im)
 
 static bool_t atr_open(struct image *im)
 {
+
+/* Original Atari drives (eg 1050) spin slightly slow (288rpm, -4%). 
+ * Later interfaces use normal-speed drives (300rpm) with a faster-than-usual
+ * bit rate (eg XF551 drives controller at 8.333MHz rather than 8MHz (+4%)). 
+ * We emulate that faster bitrate here. 
+ * Source: Atarimania FAQ, "How can I read/write Atari diskettes with
+ * my other computer?" */
+#define ATR_RATE(_r) ((_r) + (_r)/25)
+
+/* Atari machines transfer floppy data via the slow SIO interface. This is 
+ * capable of transferring only approx 2 sectors per disk revolution. Hence 
+ * a significant sector interleave is required. 
+ * Source: atariage.com/forums/topic/269694-improved-sector-layout-cx8111 */
+#define ATR_INTERLEAVE(_secs) ((_secs)/2)
+
     struct {
         uint16_t sig, size_lo, size_sec, size_hi;
         uint8_t flags, unused[7];
     } header;
     bool_t is_fm;
-    unsigned int i, j, sz, no, nr_sectors;
+    unsigned int i, j, sz, no, nr_sectors, rate;
     struct raw_sec *sec;
     struct raw_trk *trk;
     uint8_t *trk_map;
@@ -483,10 +499,13 @@ static bool_t atr_open(struct image *im)
     im->nr_cyls = 40;
     im->nr_sides = 1;
     is_fm = FALSE;
+    rate = ATR_RATE(250);
     if (no == 0) {
-        /* 40-1-18, 128b/s, FM */
         is_fm = (sz < (130*1024));
-        if (!is_fm) {
+        if (is_fm) {
+            /* 40-1-18, 128b/s, FM */
+            rate = ATR_RATE(125);
+        } else {
             /* 40-1-26, 128b/s, MFM */
             nr_sectors = 26;
         }
@@ -494,7 +513,7 @@ static bool_t atr_open(struct image *im)
         /* 40-2-18, 256b/s, MFM */
         im->nr_sides = 2;
     }
-    im->img.interleave = 1;
+    im->img.interleave = ATR_INTERLEAVE(nr_sectors);
     im->img.base_off = 16;
 
     /* Create two track layout: 0 -> Track 0; 1 -> All other tracks. */
@@ -503,6 +522,7 @@ static bool_t atr_open(struct image *im)
         trk->has_iam = TRUE;
         trk->is_fm = is_fm;
         trk->invert_data = TRUE;
+        trk->data_rate = rate;
         sec = &im->img.sec_info_base[trk->sec_off];
         for (j = 0; j < nr_sectors; j++) {
             sec->id = j + 1;
@@ -719,49 +739,60 @@ static bool_t trd_open(struct image *im)
         .nr_sectors = 16,
         .is_fm = FALSE,
         .has_iam = TRUE,
+        .has_empty = TRUE, /* see comment below */
         .no = 1, /* 256-byte */
         .gap3 = 57,
         .base = { 1, 1 }
     };
-    uint8_t geometry;
+    struct {
+        uint8_t na, free_sec, free_trk;
+        uint8_t type;
+        uint8_t nr_files;
+        uint8_t free_secs_lo, free_secs_hi;
+        uint8_t id;
+    } geometry;
+    unsigned int tot_secs, tot_trks;
 
-    /* Interrogate TR-DOS geometry identifier. */
-    F_lseek(&im->fp, 0x8e3);
-    F_read(&im->fp, &geometry, 1, NULL);
-    switch (geometry) {
+    /* Interrogate TR-DOS geometry info. */
+    F_lseek(&im->fp, 0x8e0);
+    F_read(&im->fp, &geometry, sizeof(geometry), NULL);
+    if (geometry.id != 0x10)
+        return FALSE;
+
+    /* Only four type identifiers are recognised: We use it to determine 
+     * number of disk sides. */
+    switch (geometry.type) {
     case 0x16:
-        im->nr_cyls = 80;
-        im->nr_sides = 2;
-        break;
     case 0x17:
-        im->nr_cyls = 40;
         im->nr_sides = 2;
         break;
     case 0x18:
-        im->nr_cyls = 80;
-        im->nr_sides = 1;
-        break;
     case 0x19:
-        im->nr_cyls = 40;
         im->nr_sides = 1;
         break;
     default:
-        /* Guess geometry */
-        if (im_size(im) <= 40*16*256) {
-            im->nr_cyls = 40;
-            im->nr_sides = 1;
-        } else if (im_size(im) < 40*2*16*256) {
-            im->nr_cyls = 40;
-            im->nr_sides = 1;
-        } else {
-            im->nr_cyls = 80;
-            im->nr_sides = 2;
-        }
+        return FALSE;
     }
+
+    /* Calculate total sectors on disk: First-free plus number-of-free. */
+    tot_secs = (geometry.free_sec + geometry.free_trk * 16
+                + geometry.free_secs_lo + geometry.free_secs_hi * 256);
+    if ((tot_secs & 15) || (tot_secs > 4096))
+        return FALSE; /* Too large or not a track multiple */
+
+    /* Calculate total tracks and thus number of cylinders. */
+    tot_trks = tot_secs >> 4;
+    im->nr_cyls = (tot_trks + im->nr_sides - 1) / im->nr_sides;
 
     im->img.interleave = 1;
 
     simple_layout(im, &layout);
+
+    /* Some images do not fill the last cylinder (see attached images on 
+     * issue #260). We deal with that by marking the very last track empty. */
+    if (tot_trks & (im->nr_sides-1))
+        im->img.trk_map[tot_trks] = SIMPLE_EMPTY_TRK;
+
     return raw_open(im);
 }
 
@@ -1450,12 +1481,12 @@ static bool_t raw_open(struct image *im)
 {
     im->img.rpm = im->img.rpm ?: 300;
     im->stk_per_rev = (stk_ms(200) * 300) / im->img.rpm;
-    volume_cache_init(im->bufs.write_data.p + 8192 + 2,
+    volume_cache_init(im->bufs.write_data.p + 1024,
                       im->img.heap_bottom);
     return TRUE;
 }
 
-static void raw_extend(struct image *im)
+static FSIZE_t raw_extend(struct image *im)
 {
     unsigned int i, j, sz = im->img.base_off;
     struct raw_trk *trk;
@@ -1470,13 +1501,7 @@ static void raw_extend(struct image *im)
         }
     }
 
-    if (f_size(&im->fp) >= sz)
-        return;
-
-    F_lseek(&im->fp, sz);
-    F_sync(&im->fp);
-    if (f_tell(&im->fp) != sz)
-        F_die(FR_DISK_FULL);
+    return sz;
 }
 
 static unsigned int file_idx(
@@ -1509,14 +1534,16 @@ static void raw_seek_track(
     im->img.trk = trk;
     im->img.sec_info = &im->img.sec_info_base[trk->sec_off];
 
-    /* Create logical sector map in rotational order. */
-    memset(im->img.sec_map, 0xff, trk->nr_sectors);
-    pos = ((cyl*im->img.cskew) + (side*im->img.hskew)) % trk->nr_sectors;
-    for (i = 0; i < trk->nr_sectors; i++) {
-        while (im->img.sec_map[pos] != 0xff)
-            pos = (pos + 1) % trk->nr_sectors;
-        im->img.sec_map[pos] = i;
-        pos = (pos + im->img.interleave) % trk->nr_sectors;
+    if (trk->nr_sectors != 0) {
+        /* Create logical sector map in rotational order. */
+        memset(im->img.sec_map, 0xff, trk->nr_sectors);
+        pos = ((cyl*im->img.cskew) + (side*im->img.hskew)) % trk->nr_sectors;
+        for (i = 0; i < trk->nr_sectors; i++) {
+            while (im->img.sec_map[pos] != 0xff)
+                pos = (pos + 1) % trk->nr_sectors;
+            im->img.sec_map[pos] = i;
+            pos = (pos + im->img.interleave) % trk->nr_sectors;
+        }
     }
 
     /* Sort out all other logical layout issues. */
@@ -1784,32 +1811,25 @@ static bool_t raw_write_track(struct image *im)
             }
             break;
 
-        case 0xfb: /* DAM */
-            for (i = 0; i < (sec_sz + 2); i++)
-                wrbuf[i] = mfmtobin(buf[c++ & bufmask]);
+        case 0xfb: /* DAM */ {
+            unsigned int nr, todo;
 
             if (im->img.write_sector < 0) {
                 printk("IMG DAM for unknown sector (%d)\n",
                        im->img.write_sector);
+                c += sec_sz + 2;
                 break;
             }
-
-            sec = &im->img.sec_info[im->img.write_sector];
 
             crc = (im->sync == SYNC_fm)
                 ? crc16_ccitt(&x, 1, 0xffff)
                 : crc16_ccitt(mfm_dam_header, 4, 0xffff);
-            crc = crc16_ccitt(wrbuf, sec_sz + 2, crc);
-            if (crc != 0) {
-                printk("IMG Bad CRC %04x, sector %u[%02x]\n",
-                       crc, im->img.write_sector, sec->id);
-                break;
-            }
 
-            /* All good: write out to mass storage. */
+            sec = &im->img.sec_info[im->img.write_sector];
             printk("Write %u[%02x]/%u... ", im->img.write_sector,
                    sec->id, trk->nr_sectors);
             t = time_now();
+
             sec = im->img.sec_info;
             if (im->img.file_sec_offsets) {
                 off = im->img.file_sec_offsets[im->img.write_sector];
@@ -1818,10 +1838,29 @@ static bool_t raw_write_track(struct image *im)
                     off += sec_sz(sec++->no);
             }
             F_lseek(&im->fp, im->img.trk_off + off);
-            process_data(im, wrbuf, sec_sz);
-            F_write(&im->fp, wrbuf, sec_sz, NULL);
+
+            for (todo = sec_sz; todo != 0; todo -= nr) {
+                nr = min_t(unsigned int, todo, 1024);
+                mfm_ring_to_bin(buf, bufmask, c, wrbuf, nr);
+                c += nr;
+                crc = crc16_ccitt(wrbuf, nr, crc);
+                process_data(im, wrbuf, nr);
+                F_write(&im->fp, wrbuf, nr, NULL);
+            }
+
             printk("%u us\n", time_diff(t, time_now()) / TIME_MHZ);
+
+            mfm_ring_to_bin(buf, bufmask, c, wrbuf, 2);
+            c += 2;
+            crc = crc16_ccitt(wrbuf, 2, crc);
+            if (crc != 0) {
+                printk("IMG Bad CRC %04x, sector %u[%02x]\n",
+                       crc, im->img.write_sector, sec->id);
+            }
+
             break;
+        }
+
         }
     }
 
@@ -1834,6 +1873,10 @@ static void raw_dump_info(struct image *im)
 {
     struct raw_trk *trk = im->img.trk;
     unsigned int i;
+
+    if (!verbose_image_log)
+        return;
+
     printk("C%u S%u:: %s %u-%u-%u:\n",
            im->cur_track/2, im->cur_track&1,
            (im->sync == SYNC_fm) ? "FM" : "MFM",
@@ -1851,7 +1894,8 @@ static void raw_dump_info(struct image *im)
         struct raw_sec *sec = &im->img.sec_info[im->img.sec_map[i]];
         printk("{%u,%u} ", sec->id, sec->no);
     }
-    printk("\n");
+    if (trk->nr_sectors != 0)
+        printk("\n");
 }
 
 static void img_fetch_data(struct image *im)
@@ -1862,7 +1906,7 @@ static void img_fetch_data(struct image *im)
     uint8_t sec_i;
     uint16_t off, len;
 
-    if (rd->prod != rd->cons)
+    if ((im->img.trk->nr_sectors == 0) || (rd->prod != rd->cons))
         return;
 
     sec_i = im->img.sec_map[im->img.trk_sec];
@@ -1905,7 +1949,7 @@ static void *align_p(void *p)
 static void check_p(void *p, struct image *im)
 {
     uint8_t *a = p, *b = (uint8_t *)im->bufs.read_data.p;
-    if ((int32_t)(a-b) < (8192+2))
+    if ((int32_t)(a-b) < 1024)
         F_die(FR_BAD_IMAGE);
     im->img.heap_bottom = p;
 }
@@ -1920,7 +1964,7 @@ static struct raw_trk *add_track_layout(
 
     if ((im->nr_sides < 1) || (im->nr_sides > 2)
         || (im->nr_cyls < 1) || (im->nr_cyls > 254)
-        || (nr_sectors < 1) || (nr_sectors > 256))
+        || (nr_sectors > 256))
         F_die(FR_BAD_IMAGE);
 
     if (!im->img.trk_info) {
@@ -1992,6 +2036,11 @@ static void simple_layout(struct image *im, const struct simple_layout *layout)
         }
     }
 
+    if (layout->has_empty) {
+        /* Add an empty track layout. */
+        add_track_layout(im, 0, i);
+    }
+
     /* Create track map, mapping each side to its respective layout. */
     trk_map = add_track_map(im);
     for (i = 0; i < im->nr_cyls; i++)
@@ -2055,9 +2104,9 @@ static void mfm_prep_track(struct image *im)
     im->tracklen_bc = (trk->data_rate * 400 * 300) / im->img.rpm;
 
     /* Calculate a suitable GAP3 if not specified. */
-    if (gap_3 == 0) {
+    if ((trk->nr_sectors != 0) && (gap_3 == 0)) {
         int space;
-        uint8_t no = trk->nr_sectors ? im->img.sec_info[0].no : 2;
+        uint8_t no = im->img.sec_info[0].no;
         im->img.dam_sz_post -= trk->gap_3;
         tracklen -= 16 * trk->nr_sectors * trk->gap_3;
         space = max_t(int, 0, im->tracklen_bc - tracklen);
@@ -2101,7 +2150,7 @@ static bool_t mfm_read_track(struct image *im)
     uint8_t *buf = rd->p;
     uint16_t *bc_b = bc->p;
     uint32_t bc_len, bc_mask, bc_space, bc_p, bc_c;
-    uint16_t pr = 0, crc;
+    uint16_t pr, crc;
     unsigned int i;
 
     img_fetch_data(im);
@@ -2113,6 +2162,7 @@ static bool_t mfm_read_track(struct image *im)
     bc_mask = bc_len - 1;
     bc_space = bc_len - (uint16_t)(bc_p - bc_c);
 
+    pr = be16toh(bc_b[(bc_p-1) & bc_mask]);
 #define emit_raw(r) ({                                   \
     uint16_t _r = (r);                                   \
     bc_b[bc_p++ & bc_mask] = htobe16(_r & ~(pr << 15));  \
@@ -2268,9 +2318,9 @@ static void fm_prep_track(struct image *im)
     im->tracklen_bc = (trk->data_rate * 400 * 300) / im->img.rpm;
 
     /* Calculate a suitable GAP3 if not specified. */
-    if (trk->gap_3 == 0) {
+    if ((trk->nr_sectors != 0) && (trk->gap_3 == 0)) {
         int space = max_t(int, 0, im->tracklen_bc - tracklen);
-        uint8_t no = trk->nr_sectors ? im->img.sec_info[0].no : 2;
+        uint8_t no = im->img.sec_info[0].no;
         trk->gap_3 = min_t(int, space/(16*trk->nr_sectors), GAP_3[no]);
         im->img.dam_sz_post += trk->gap_3;
         tracklen += 16 * trk->nr_sectors * trk->gap_3;
@@ -2289,13 +2339,6 @@ static void fm_prep_track(struct image *im)
     im->sync = SYNC_fm;
 
     raw_dump_info(im);
-}
-
-uint16_t fm_sync(uint8_t dat, uint8_t clk)
-{
-    uint16_t _dat = mfmtab[dat] & 0x5555;
-    uint16_t _clk = (mfmtab[clk] & 0x5555) << 1;
-    return _clk | _dat;
 }
 
 static bool_t fm_read_track(struct image *im)

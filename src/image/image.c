@@ -9,6 +9,8 @@
  * See the file COPYING for more details, or visit <http://unlicense.org>.
  */
 
+#if !defined(QUICKDISK)
+
 extern const struct image_handler adf_image_handler;
 extern const struct image_handler atr_image_handler;
 extern const struct image_handler hfe_image_handler;
@@ -42,6 +44,7 @@ const struct image_type image_type[] = {
     { "hfe", &hfe_image_handler },
     { "img", &img_image_handler },
     { "ima", &img_image_handler },
+    { "out", &img_image_handler },
     { "st",  &st_image_handler },
     { "adl", &adfs_image_handler },
     { "adm", &adfs_image_handler },
@@ -59,6 +62,18 @@ const struct image_type image_type[] = {
     { "xdf", &xdf_image_handler },
     { "", NULL }
 };
+
+#else /* defined(QUICKDISK) */
+
+extern const struct image_handler qd_image_handler;
+
+const struct image_type image_type[] = {
+    { "qd", &qd_image_handler },
+    { "", NULL }
+};
+
+#endif /* QUICKDISK */
+
 
 bool_t image_valid(FILINFO *fp)
 {
@@ -86,7 +101,8 @@ bool_t image_valid(FILINFO *fp)
     return FALSE;
 }
 
-static bool_t try_handler(struct image *im, const struct slot *slot,
+static bool_t try_handler(struct image *im, struct slot *slot,
+                          DWORD *cltbl,
                           const struct image_handler *handler)
 {
     struct image_bufs bufs = im->bufs;
@@ -109,11 +125,14 @@ static bool_t try_handler(struct image *im, const struct slot *slot,
     if (handler->write_track != NULL)
         mode |= FA_WRITE;
     fatfs_from_slot(&im->fp, slot, mode);
+    im->fp.cltbl = cltbl;
 
     return handler->open(im);
 }
 
-void image_open(struct image *im, const struct slot *slot)
+#if !defined(QUICKDISK)
+
+void image_open(struct image *im, struct slot *slot, DWORD *cltbl)
 {
     static const struct image_handler * const image_handlers[] = {
         /* Special handler for dummy slots (empty HxC slot 0). */
@@ -137,7 +156,6 @@ void image_open(struct image *im, const struct slot *slot)
         if (!strcmp(ext, type->ext))
             break;
     hint = type->handler;
-    if (hint == NULL)
 
     /* Apply host-specific overrides to the hint. */
     switch (ff_cfg.host) {
@@ -152,11 +170,11 @@ void image_open(struct image *im, const struct slot *slot)
     }
 
     while (hint != NULL) {
-        if (try_handler(im, slot, hint))
+        if (try_handler(im, slot, cltbl, hint))
             return;
         /* Hint failed. Try a secondary hint. */
         if (hint == &img_image_handler)
-            /* IMG,IMA,DSK -> XDF */
+            /* IMG,IMA,DSK,OUT -> XDF */
             hint = &xdf_image_handler;
         else if (!strcmp(ext, "dsk")) 
             /* DSK -> IMG */
@@ -167,7 +185,7 @@ void image_open(struct image *im, const struct slot *slot)
 
     /* Filename extension hinting failed: walk the handler list. */
     for (i = 0; i < ARRAY_SIZE(image_handlers); i++) {
-        if (try_handler(im, slot, image_handlers[i]))
+        if (try_handler(im, slot, cltbl, image_handlers[i]))
             return;
     }
 
@@ -175,15 +193,67 @@ void image_open(struct image *im, const struct slot *slot)
     F_die(FR_BAD_IMAGE);
 }
 
+#else /* defined(QUICKDISK) */
+
+void image_open(struct image *im, struct slot *slot, DWORD *cltbl)
+{
+    if (try_handler(im, slot, cltbl, &qd_image_handler))
+        return;
+
+    /* No handler found: bad image. */
+    F_die(FR_BAD_IMAGE);
+}
+
+#endif
+
 void image_extend(struct image *im)
 {
-    if (im->handler->extend && im->fp.dir_ptr && ff_cfg.extend_image)
-        im->handler->extend(im);
+    FSIZE_t new_sz;
+
+    if (!(im->handler->extend && im->fp.dir_ptr && ff_cfg.extend_image))
+        return;
+
+    new_sz = im->handler->extend(im);
+    if (f_size(&im->fp) >= new_sz)
+        return;
+
+    /* Disable fast-seek mode, as it disallows extending the file. */
+    im->fp.cltbl = NULL;
+
+    /* Attempt to extend the file. */
+    F_lseek(&im->fp, new_sz);
+    F_sync(&im->fp);
+    if (f_tell(&im->fp) != new_sz)
+        F_die(FR_DISK_FULL);
+
+    /* Update the slot for the new file size. */
+    im->slot->size = new_sz;
+}
+
+static void print_image_info(struct image *im)
+{
+    char msg[25];
+    const static char *sync_s[] = { "Raw", "FM", "MFM" };
+    const static char dens_c[] = { 'S', 'D', 'H', 'E' };
+    int tlen, i;
+
+    i = 0;
+    for (tlen = 75000; tlen < im->tracklen_bc; tlen *= 2) {
+        if (i == (sizeof(dens_c)-1))
+            break;
+        i++;
+    }
+    snprintf(msg, sizeof(msg), "%s %cS/%cD %uT",
+             sync_s[im->sync],
+             (im->nr_sides == 1) ? 'S' : 'D',
+             dens_c[i], im->nr_cyls);
+    lcd_write(0, 2, -1, msg);
 }
 
 bool_t image_setup_track(
     struct image *im, uint16_t track, uint32_t *start_pos)
 {
+#if !defined(QUICKDISK)
     if (track < (DA_FIRST_CYL*2)) {
         /* If we are exiting D-A mode then need to re-read the config file. */
         if (im->handler == &da_image_handler)
@@ -191,8 +261,11 @@ bool_t image_setup_track(
     } else {
         im->handler = &da_image_handler;
     }
+#endif
 
     im->handler->setup_track(im, track, start_pos);
+
+    print_image_info(im);
 
     return FALSE;
 }
@@ -200,53 +273,6 @@ bool_t image_setup_track(
 bool_t image_read_track(struct image *im)
 {
     return im->handler->read_track(im);
-}
-
-uint16_t bc_rdata_flux(struct image *im, uint16_t *tbuf, uint16_t nr)
-{
-    uint32_t ticks_per_cell = im->ticks_per_cell;
-    uint32_t ticks = im->ticks_since_flux;
-    uint32_t x, y = 32, todo = nr;
-    struct image_buf *bc = &im->bufs.read_bc;
-    uint32_t *bc_b = bc->p, bc_c = bc->cons, bc_p = bc->prod & ~31;
-    unsigned int bc_mask = (bc->len / 4) - 1;
-
-    /* Convert pre-generated bitcells into flux timings. */
-    while (bc_c != bc_p) {
-        y = bc_c % 32;
-        x = be32toh(bc_b[(bc_c / 32) & bc_mask]) << y;
-        bc_c += 32 - y;
-        im->cur_bc += 32 - y;
-        im->cur_ticks += (32 - y) * ticks_per_cell;
-        while (y < 32) {
-            y++;
-            ticks += ticks_per_cell;
-            if ((int32_t)x < 0) {
-                *tbuf++ = (ticks >> 4) - 1;
-                ticks &= 15;
-                if (!--todo)
-                    goto out;
-            }
-            x <<= 1;
-        }
-    }
-
-    ASSERT(y == 32);
-
-out:
-    bc->cons = bc_c - (32 - y);
-    im->cur_bc -= 32 - y;
-    im->cur_ticks -= (32 - y) * ticks_per_cell;
-    im->ticks_since_flux = ticks;
-
-    if (im->cur_bc >= im->tracklen_bc) {
-        im->cur_bc -= im->tracklen_bc;
-        ASSERT(im->cur_bc < im->tracklen_bc);
-        im->tracklen_ticks = im->cur_ticks - im->cur_bc * ticks_per_cell;
-        im->cur_ticks -= im->tracklen_ticks;
-    }
-
-    return nr - todo;
 }
 
 uint16_t image_rdata_flux(struct image *im, uint16_t *tbuf, uint16_t nr)
@@ -264,7 +290,10 @@ uint32_t image_ticks_since_index(struct image *im)
     uint32_t ticks = im->cur_ticks - im->ticks_since_flux;
     if ((int32_t)ticks < 0)
         ticks += im->tracklen_ticks;
-    return ticks >> 4;
+#if !defined(QUICKDISK)
+    ticks >>= 4;
+#endif
+    return ticks;
 }
 
 /*

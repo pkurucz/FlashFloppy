@@ -44,18 +44,94 @@ const uint16_t mfmtab[] = {
     0x554a, 0x5549, 0x5544, 0x5545, 0x5552, 0x5551, 0x5554, 0x5555
 };
 
-uint8_t mfmtobin(uint16_t x)
+uint8_t always_inline mfmtobin(uint16_t x)
 {
-    unsigned int i;
-    uint8_t y = 0;
-    x  = be16toh(x) << 1;
-    for (i = 0; i < 8; i++) {
-        y <<= 1;
-        if ((int16_t)x < 0)
-            y |= 1;
-        x <<= 2;
-    }
+    uint8_t y;
+    x = be16toh(x) << 1;
+    asm volatile (
+        "lsrs %1,%1,#2 ; rrx %0,%0\n"
+        "lsrs %1,%1,#2 ; rrx %0,%0\n"
+        "lsrs %1,%1,#2 ; rrx %0,%0\n"
+        "lsrs %1,%1,#2 ; rrx %0,%0\n"
+        "lsrs %1,%1,#2 ; rrx %0,%0\n"
+        "lsrs %1,%1,#2 ; rrx %0,%0\n"
+        "lsrs %1,%1,#2 ; rrx %0,%0\n"
+        "lsrs %1,%1,#2 ; rrx %0,%0\n"
+        "rev %0,%0\n"
+        : "=&r" (y) : "r" (x) );
     return y;
+}
+
+void mfm_to_bin(const void *in, void *out, unsigned int nr)
+{
+    const uint16_t *_in = in;
+    uint8_t *_out = out;
+    while (nr--)
+        *_out++ = mfmtobin(*_in++);
+}
+
+void mfm_ring_to_bin(const uint16_t *ring, unsigned int mask,
+                     unsigned int idx, void *out, unsigned int nr)
+{
+    unsigned int head;
+    head = min_t(unsigned int, nr, mask+1-idx);
+    mfm_to_bin(&ring[idx], out, head);
+    if (head != nr) 
+        mfm_to_bin(ring, (uint8_t *)out + head, nr - head);
+}
+
+uint16_t fm_sync(uint8_t dat, uint8_t clk)
+{
+    uint16_t _dat = mfmtab[dat] & 0x5555;
+    uint16_t _clk = (mfmtab[clk] & 0x5555) << 1;
+    return _clk | _dat;
+}
+
+uint16_t bc_rdata_flux(struct image *im, uint16_t *tbuf, uint16_t nr)
+{
+    uint32_t ticks_per_cell = im->ticks_per_cell;
+    uint32_t ticks = im->ticks_since_flux;
+    uint32_t x, y = 32, todo = nr;
+    struct image_buf *bc = &im->bufs.read_bc;
+    uint32_t *bc_b = bc->p, bc_c = bc->cons, bc_p = bc->prod & ~31;
+    unsigned int bc_mask = (bc->len / 4) - 1;
+
+    /* Convert pre-generated bitcells into flux timings. */
+    while (bc_c != bc_p) {
+        y = bc_c % 32;
+        x = be32toh(bc_b[(bc_c / 32) & bc_mask]) << y;
+        bc_c += 32 - y;
+        im->cur_bc += 32 - y;
+        im->cur_ticks += (32 - y) * ticks_per_cell;
+        while (y < 32) {
+            y++;
+            ticks += ticks_per_cell;
+            if ((int32_t)x < 0) {
+                *tbuf++ = (ticks >> 4) - 1;
+                ticks &= 15;
+                if (!--todo)
+                    goto out;
+            }
+            x <<= 1;
+        }
+    }
+
+    ASSERT(y == 32);
+
+out:
+    bc->cons = bc_c - (32 - y);
+    im->cur_bc -= 32 - y;
+    im->cur_ticks -= (32 - y) * ticks_per_cell;
+    im->ticks_since_flux = ticks;
+
+    if (im->cur_bc >= im->tracklen_bc) {
+        im->cur_bc -= im->tracklen_bc;
+        ASSERT(im->cur_bc < im->tracklen_bc);
+        im->tracklen_ticks = im->cur_ticks - im->cur_bc * ticks_per_cell;
+        im->cur_ticks -= im->tracklen_ticks;
+    }
+
+    return nr - todo;
 }
 
 /*

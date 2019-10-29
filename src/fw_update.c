@@ -1,5 +1,5 @@
 /*
- * update.c
+ * fw_update.c
  * 
  * USB-flash update bootloader for main firmware.
  * 
@@ -32,19 +32,10 @@
  * See the file COPYING for more details, or visit <http://unlicense.org>.
  */
 
-#ifndef RELOADER
 /* Main bootloader: flashes the main firmware (last 96kB of Flash). */
 #define FIRMWARE_START 0x08008000
 #define FIRMWARE_END   (0x08020000 - FLASH_PAGE_SIZE)
 #define FILE_PATTERN   "ff_gotek*.upd"
-#define is_reloader    FALSE
-#else
-/* "Reloader": reflashes the main bootloader (first 32kB). */
-#define FIRMWARE_START 0x08000000
-#define FIRMWARE_END   0x08008000
-#define FILE_PATTERN   "ff_gotek*.rld"
-#define is_reloader    TRUE
-#endif
 
 int EXC_reset(void) __attribute__((alias("main")));
 
@@ -76,6 +67,24 @@ static void canary_check(void)
     ASSERT(_thread_stackbottom[0] == 0xdeadbeef);
 }
 
+static bool_t fw_update_requested(void)
+{
+    bool_t requested;
+
+    /* Power up the backup-register interface and allow writes. */
+    rcc->apb1enr |= RCC_APB1ENR_PWREN | RCC_APB1ENR_BKPEN;
+    pwr->cr |= PWR_CR_DBP;
+
+    /* Has bootloader been requested via magic numbers in the backup regs? */
+    requested = ((bkp->dr1[0] == 0xdead) && (bkp->dr1[1] == 0xbeef));
+
+    /* Clean up backup registers and peripheral clocks. */
+    bkp->dr1[0] = bkp->dr1[1] = 0;
+    rcc->apb1enr = 0;
+
+    return requested;
+}
+
 static void erase_old_firmware(void)
 {
     uint32_t p;
@@ -90,7 +99,7 @@ static void msg_display(const char *p)
     case DM_LED_7SEG:
         led_7seg_write_string(p);
         break;
-    case DM_LCD_1602:
+    case DM_LCD_OLED:
         lcd_write(6, 1, 0, p);
         lcd_sync();
         break;
@@ -209,19 +218,26 @@ static void display_setting(bool_t on)
     case DM_LED_7SEG:
         led_7seg_display_setting(on);
         break;
-    case DM_LCD_1602:
+    case DM_LCD_OLED:
         lcd_backlight(on);
         lcd_sync();
         break;
     }
 }
 
+#define B_LEFT 1
+#define B_RIGHT 2
+#define B_SELECT 4
+
 static bool_t buttons_pressed(void)
 {
-    /* Check for both LEFT and RIGHT buttons pressed. */
-    return ((!gpio_read_pin(gpioc, 8) && !gpio_read_pin(gpioc, 7))
-            /* Also respond to third (SELECT) button on its own. */
-            || !gpio_read_pin(gpioc, 6));
+    return (
+        /* Check for both LEFT and RIGHT buttons pressed. */
+        (!gpio_read_pin(gpioc, 8) && !gpio_read_pin(gpioc, 7))
+        || ((osd_buttons_rx & (B_LEFT|B_RIGHT)) == (B_LEFT|B_RIGHT))
+        /* Also respond to third (SELECT) button on its own. */
+        || !gpio_read_pin(gpioc, 6)
+        || (osd_buttons_rx & B_SELECT));
 }
 
 /* Wait for both buttons to be pressed (LOW) or not pressed (HIGH). Perform 
@@ -238,7 +254,8 @@ static void wait_buttons(uint8_t level)
             /* All buttons must be released. */
             x |= gpio_read_pin(gpioc, 8)
                 && gpio_read_pin(gpioc, 7)
-                && gpio_read_pin(gpioc, 6);
+                && gpio_read_pin(gpioc, 6)
+                && !osd_buttons_rx;
         } else {
             x |= buttons_pressed();
         }
@@ -255,7 +272,6 @@ int main(void)
         memcpy(_sdat, _ldat, _edat-_sdat);
     memset(_sbss, 0, _ebss-_sbss);
 
-#ifndef RELOADER
     /* Enable GPIOC, set all pins as input with weak pull-up. */
     rcc->apb2enr = RCC_APB2ENR_IOPCEN;
     gpioc->odr = 0xffffu;
@@ -263,7 +279,7 @@ int main(void)
     gpioc->crl = 0x88888888u;
 
     /* Enter update mode only if buttons are pressed. */
-    if (!buttons_pressed()) {
+    if (!buttons_pressed() && !fw_update_requested()) {
         /* Nope, so jump straight at the main firmware. */
         uint32_t sp = *(uint32_t *)FIRMWARE_START;
         uint32_t pc = *(uint32_t *)(FIRMWARE_START + 4);
@@ -273,7 +289,6 @@ int main(void)
                 :: "r" (sp), "r" (pc));
         }
     }
-#endif
 
     /*
      * UPDATE MODE
@@ -287,9 +302,7 @@ int main(void)
     board_init();
     delay_ms(200); /* 5v settle */
 
-    printk("\n** FF %s v%s for Gotek\n",
-           is_reloader ? "Reloader" : "Update Bootloader",
-           fw_ver);
+    printk("\n** FF Update Bootloader v%s for Gotek\n", fw_ver);
     printk("** Keir Fraser <keir.xen@gmail.com>\n");
     printk("** https://github.com/keirf/FlashFloppy\n\n");
 
@@ -298,11 +311,10 @@ int main(void)
     display_init();
     switch (display_mode) {
     case DM_LED_7SEG:
-        msg_display(is_reloader ? "RLD" : "UPD");
+        msg_display("UPD");
         break;
-    case DM_LCD_1602:
-        snprintf(msg, sizeof(msg), "FF %s",
-                 is_reloader ? "Reloader" : "Update Flash");
+    case DM_LCD_OLED:
+        snprintf(msg, sizeof(msg), "FF Update Flash");
         lcd_write(0, 0, 0, msg);
         lcd_write(0, 1, 0, "v");
         lcd_write(1, 1, 0, fw_ver);
@@ -315,13 +327,10 @@ int main(void)
     usbh_msc_init();
     usbh_msc_buffer_set(USBH_Cfg_Rx_Buffer);
 
-    /* Wait for buttons to be pressed. */
-    wait_buttons(LOW);
-
     /* Wait for buttons to be released. */
     wait_buttons(HIGH);
 
-    if (display_mode == DM_LCD_1602)
+    if (display_mode == DM_LCD_OLED)
         lcd_write(0, 1, -1, "     [   ]");
 
     /* Wait for a filesystem. */
